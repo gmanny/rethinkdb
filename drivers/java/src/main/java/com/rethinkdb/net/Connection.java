@@ -4,19 +4,16 @@ import com.rethinkdb.ast.Query;
 import com.rethinkdb.ast.ReqlAst;
 import com.rethinkdb.gen.ast.Db;
 import com.rethinkdb.gen.exc.ReqlDriverError;
-import com.rethinkdb.gen.proto.Protocol;
-import com.rethinkdb.gen.proto.Version;
 import com.rethinkdb.model.Arguments;
 import com.rethinkdb.model.OptArgs;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.net.ssl.SSLContext;
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.Closeable;
 import java.net.SocketAddress;
-import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -43,7 +40,7 @@ public class Connection implements Closeable {
     // network stuff
     Optional<SocketWrapper> socket = Optional.empty();
 
-    private Map<Long, Cursor> cursorCache = new ConcurrentHashMap<>();
+    private Map<Long, OutstandingQuery> cursorCache = new ConcurrentHashMap<>();
 
     // execution stuff
     private ExecutorService exec;
@@ -156,7 +153,7 @@ public class Connection implements Closeable {
             nextToken.set(0);
 
             // clear cursor cache
-            for (Cursor cursor : cursorCache.values()) {
+            for (OutstandingQuery cursor : cursorCache.values()) {
                 cursor.setError("Connection is closed.");
             }
             cursorCache.clear();
@@ -199,7 +196,7 @@ public class Connection implements Closeable {
      * @param deadline the timeout.
      * @return a completable future.
      */
-    private Future<Response> sendQuery(Query query, Optional<Long> deadline) {
+    private CompletableFuture<Response> sendQuery(Query query, Optional<Long> deadline) {
         // check if response pump is running
         if (!exec.isShutdown() && !exec.isTerminated()) {
             final CompletableFuture<Response> awaiter = new CompletableFuture<>();
@@ -240,6 +237,19 @@ public class Connection implements Closeable {
         throw new ReqlDriverError("Can't write query because response pump is not running.");
     }
 
+    <T> T getWrapped(CompletableFuture<T> future) {
+        try {
+            return future.get();
+        } catch (InterruptedException e) {
+            throw new ReqlDriverError(e);
+        } catch (ExecutionException e) {
+            if (e.getCause() instanceof RuntimeException) {
+                throw (RuntimeException) e.getCause(); // throw cause to maintain test compatibility
+            } else {
+                throw new ReqlDriverError(e);
+            }
+        }
+    }
 
     void runQueryNoreply(Query query) {
         sendQueryNoreply(query);
@@ -255,45 +265,49 @@ public class Connection implements Closeable {
 
     /**
      * Runs a query and blocks until a response is retrieved.
-     *
-     * @param query
-     * @param pojoClass
-     * @param timeout
-     * @param <T>
-     * @param <P>
-     * @return
      */
     <T, P> T runQuery(Query query, Optional<Class<P>> pojoClass, Optional<Long> timeout) {
-        Response res = null;
-        try {
-            res = sendQuery(query, timeout).get();
-        } catch (InterruptedException | ExecutionException e) {
-            throw new ReqlDriverError(e);
-        }
+        return getWrapped(
+            this.<T, P> runQueryAsync(query, pojoClass, timeout)
+        );
+    }
 
-        if (res.isAtom()) {
-            try {
-                Converter.FormatOptions fmt = new Converter.FormatOptions(query.globalOptions);
-                Object value = ((List) Converter.convertPseudotypes(res.data, fmt)).get(0);
-                return Util.convertToPojo(value, pojoClass);
-            } catch (IndexOutOfBoundsException ex) {
-                throw new ReqlDriverError("Atom response was empty!", ex);
+    <T, P> CompletableFuture<T> runQueryAsync(Query query) {
+        return runQueryAsync(query, Optional.empty());
+    }
+    <T, P> CompletableFuture<T> runQueryAsync(Query query, Optional<Class<P>> pojoClass) {
+        return runQueryAsync(query, pojoClass, Optional.empty());
+    }
+
+    /**
+     * Runs a query asynchronously and returns a response future.
+     */
+    <T, P> CompletableFuture<T> runQueryAsync(Query query, Optional<Class<P>> pojoClass, Optional<Long> timeout) {
+        return sendQuery(query, timeout).thenApply(res -> {
+            if (res.isAtom()) {
+                try {
+                    Converter.FormatOptions fmt = new Converter.FormatOptions(query.globalOptions);
+                    Object value = ((List) Converter.convertPseudotypes(res.data, fmt)).get(0);
+                    return Util.convertToPojo(value, pojoClass);
+                } catch (IndexOutOfBoundsException ex) {
+                    throw new ReqlDriverError("Atom response was empty!", ex);
+                }
+            } else if (res.isPartial() || res.isSequence()) {
+                Cursor cursor = Cursor.create(this, query, res, pojoClass);
+                return (T) cursor;
+            } else if (res.isWaitComplete()) {
+                return null;
+            } else {
+                throw res.makeError(query);
             }
-        } else if (res.isPartial() || res.isSequence()) {
-            Cursor cursor = Cursor.create(this, query, res, pojoClass);
-            return (T) cursor;
-        } else if (res.isWaitComplete()) {
-            return null;
-        } else {
-            throw res.makeError(query);
-        }
+        });
     }
 
     private long newToken() {
         return nextToken.incrementAndGet();
     }
 
-    void addToCache(long token, Cursor cursor) {
+    void addToCache(long token, OutstandingQuery cursor) {
         cursorCache.put(token, cursor);
     }
 
@@ -332,20 +346,41 @@ public class Connection implements Closeable {
         return runQuery(q, pojoClass, timeout);
     }
 
+    public <T, P> CompletableFuture<T> runAsync(ReqlAst term, OptArgs globalOpts, Optional<Class<P>> pojoClass) {
+        return runAsync(term, globalOpts, pojoClass, Optional.empty());
+    }
+
+    public <T, P> CompletableFuture<T> runAsync(ReqlAst term, OptArgs globalOpts, Optional<Class<P>> pojoClass, Optional<Long> timeout) {
+        setDefaultDB(globalOpts);
+        Query q = Query.start(newToken(), term, globalOpts);
+        if (globalOpts.containsKey("noreply")) {
+            throw new ReqlDriverError(
+                    "Don't provide the noreply option as an optarg. " +
+                            "Use `.runNoReply` instead of `.run`");
+        }
+        return runQueryAsync(q, pojoClass, timeout);
+    }
+
     public void runNoReply(ReqlAst term, OptArgs globalOpts) {
         setDefaultDB(globalOpts);
         globalOpts.with("noreply", true);
         runQueryNoreply(Query.start(newToken(), term, globalOpts));
     }
 
-    Future<Response> continue_(Cursor cursor) {
-        return sendQuery(Query.continue_(cursor.token), Optional.empty());
+    CompletableFuture<Response> continue_(OutstandingQuery cursor) {
+        return sendQuery(Query.continue_(cursor.getToken()), Optional.empty());
     }
 
 
-    void stop(Cursor cursor) {
+    void stop(OutstandingQuery cursor) {
         // The server does reply to a stop request, though the response doesn't have a value.
-        runQuery(Query.stop(cursor.token));
+        getWrapped(
+            stopAsync(cursor)
+        );
+    }
+
+    <T> CompletableFuture<T> stopAsync(OutstandingQuery cursor) {
+        return runQueryAsync(Query.stop(cursor.getToken()));
     }
 
     /**

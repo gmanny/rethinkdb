@@ -112,6 +112,66 @@ public class ReqlAst {
         return conn.run(this, runOpts, Optional.of(pojoClass));
     }
 
+    /**
+     * Runs this query via connection {@code conn} with default options and returns an atom result
+     * or a sequence result as a cursor. The atom result either has a primitive type (e.g., {@code Integer})
+     * or represents a JSON object as a {@code Map<String, Object>}. The cursor is a {@code com.rethinkdb.net.Cursor}
+     * which may be iterated to get a sequence of atom results
+     * @param conn The connection to run this query
+     * @param <T> The type of result
+     * @return The result of this query
+     */
+    public <T> T runAsync(Connection conn) {
+        return conn.runAsync(this, new OptArgs(), Optional.empty());
+    }
+
+    /**
+     * Runs this query via connection {@code conn} with options {@code runOpts} and returns an atom result
+     * or a sequence result as a cursor. The atom result either has a primitive type (e.g., {@code Integer})
+     * or represents a JSON object as a {@code Map<String, Object>}. The cursor is a {@code com.rethinkdb.net.Cursor}
+     * which may be iterated to get a sequence of atom results
+     * @param conn The connection to run this query
+     * @param runOpts The options to run this query with
+     * @param <T> The type of result
+     * @return The result of this query
+     */
+    public <T> T runAsync(Connection conn, OptArgs runOpts) {
+        return conn.runAsync(this, runOpts, Optional.empty());
+    }
+
+    /**
+     * Runs this query via connection {@code conn} with default options and returns an atom result
+     * or a sequence result as a cursor. The atom result representing a JSON object is converted
+     * to an object of type {@code Class<P>} specified with {@code pojoClass}. The cursor
+     * is a {@code com.rethinkdb.net.Cursor} which may be iterated to get a sequence of atom results
+     * of type {@code Class<P>}
+     * @param conn The connection to run this query
+     * @param pojoClass The class of POJO to convert to
+     * @param <T> The type of result
+     * @param <P> The type of POJO to convert to
+     * @return The result of this query (either a {@code P or a Cursor<P>}
+     */
+    public <T, P> T runAsync(Connection conn, Class<P> pojoClass) {
+        return conn.runAsync(this, new OptArgs(), Optional.of(pojoClass));
+    }
+
+    /**
+     * Runs this query via connection {@code conn} with options {@code runOpts} and returns an atom result
+     * or a sequence result as a cursor. The atom result representing a JSON object is converted
+     * to an object of type {@code Class<P>} specified with {@code pojoClass}. The cursor
+     * is a {@code com.rethinkdb.net.Cursor} which may be iterated to get a sequence of atom results
+     * of type {@code Class<P>}
+     * @param conn The connection to run this query
+     * @param runOpts The options to run this query with
+     * @param pojoClass The class of POJO to convert to
+     * @param <T> The type of result
+     * @param <P> The type of POJO to convert to
+     * @return The result of this query (either a {@code P or a Cursor<P>}
+     */
+    public <T, P> T runAsync(Connection conn, OptArgs runOpts, Class<P> pojoClass) {
+        return conn.runAsync(this, runOpts, Optional.of(pojoClass));
+    }
+
     public void runNoReply(Connection conn){
         conn.runNoReply(this, new OptArgs());
     }

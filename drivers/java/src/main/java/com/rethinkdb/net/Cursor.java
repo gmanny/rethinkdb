@@ -18,7 +18,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 
-public abstract class Cursor<T> implements Iterator<T>, Iterable<T>, Closeable {
+public abstract class Cursor<T> implements Iterator<T>, Iterable<T>, Closeable, OutstandingQuery {
 
     // public immutable members
     public final long token;
@@ -55,6 +55,11 @@ public abstract class Cursor<T> implements Iterator<T>, Iterable<T>, Closeable {
                 connection.stop(this);
             }
         }
+    }
+
+    @Override
+    public long getToken() {
+        return token;
     }
 
     public int bufferedSize() {
@@ -117,7 +122,7 @@ public abstract class Cursor<T> implements Iterator<T>, Iterable<T>, Closeable {
         this.extend(res);
     }
 
-    void setError(String errMsg) {
+    public void setError(String errMsg) {
         if(!error.isPresent()){
             error = Optional.of(new ReqlRuntimeError(errMsg));
             Response dummyResponse = Response
